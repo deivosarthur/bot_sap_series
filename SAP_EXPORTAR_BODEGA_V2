@@ -1,0 +1,282 @@
+Dim SapGuiAuto
+Dim application
+Dim connection
+Dim session
+Dim saltarTecnico
+Dim fso
+Dim carpetaGrupos
+Dim archivoGrupo
+Dim archivo
+Dim linea
+Dim datos
+
+Dim rut
+Dim sistema
+Dim bodega
+Dim almacen
+
+Dim partes
+Dim nombreGrupo
+
+Dim grid
+Dim sinMateriales
+
+Dim totalProcesados
+Dim totalSinMateriales
+
+Dim logFile
+Dim rutaLog
+
+Dim mensajeSAP
+Dim pantallaValida
+
+On Error Resume Next
+
+Set fso = CreateObject("Scripting.FileSystemObject")
+
+carpetaGrupos = "C:\sap\SAP\grupos"
+rutaLog = "C:\sap\SAP\logs\tecnicos_sin_materiales.txt"
+
+If Not fso.FolderExists("C:\sap\SAP\logs") Then
+    fso.CreateFolder("C:\sap\SAP\logs")
+End If
+
+Set logFile = fso.OpenTextFile(rutaLog,8,True)
+
+totalProcesados = 0
+totalSinMateriales = 0
+
+WScript.Echo "Conectando SAP..."
+
+Set SapGuiAuto = GetObject("SAPGUI")
+
+If Err.Number <> 0 Then
+    WScript.Echo "ERROR: SAP no está abierto."
+    WScript.Quit
+End If
+
+Set application = SapGuiAuto.GetScriptingEngine
+Set connection = application.Children(0)
+Set session = connection.Children(0)
+
+session.findById("wnd[0]").maximize
+
+'---------------------------------------
+' ABRIR REPORTE
+'---------------------------------------
+
+session.findById("wnd[0]/usr/cntlIMAGE_CONTAINER/shellcont/shell/shellcont[0]/shell").doubleClickNode "F00010"
+
+WScript.Sleep 3000
+
+'=======================================
+' RECORRER ARCHIVOS DE GRUPO
+'=======================================
+
+For Each archivoGrupo In fso.GetFolder(carpetaGrupos).Files
+
+    If InStr(archivoGrupo.Name,"grupo_") > 0 Then
+
+        nombreGrupo = Replace(archivoGrupo.Name,"grupo_","")
+        nombreGrupo = Replace(nombreGrupo,".csv","")
+
+        partes = Split(nombreGrupo,"_")
+
+        bodega = partes(0)
+        almacen = partes(1)
+
+        sistema = "TOA"
+
+        WScript.Echo "--------------------------------"
+        WScript.Echo "Procesando grupo:"
+        WScript.Echo "Bodega: " & bodega
+        WScript.Echo "Almacen: " & almacen
+
+        Set archivo = fso.OpenTextFile(archivoGrupo.Path)
+
+        Do Until archivo.AtEndOfStream
+
+            linea = Trim(archivo.ReadLine)
+
+            If linea <> "" Then
+
+                saltarTecnico = False
+                pantallaValida = True
+
+                datos = Split(linea,",")
+                rut = Trim(datos(0))
+
+                totalProcesados = totalProcesados + 1
+
+                WScript.Echo "Procesando tecnico: " & rut
+
+                '---------------------------------------
+                ' CARGAR PARAMETROS
+                '---------------------------------------
+
+                session.findById("wnd[0]/usr/ctxtS_STCD1-LOW").text = rut
+                session.findById("wnd[0]/usr/ctxtP_SIST").text = sistema
+                session.findById("wnd[0]/usr/ctxtP_WERKS").text = bodega
+                session.findById("wnd[0]/usr/txtP_LGORT").text = almacen
+
+                session.findById("wnd[0]/tbar[1]/btn[8]").press
+
+                Do While session.Busy
+                    WScript.Sleep 500
+                Loop
+
+                '---------------------------------------
+                ' VALIDAR MENSAJE SAP
+                '---------------------------------------
+
+                mensajeSAP = session.findById("wnd[0]/sbar").Text
+
+                If InStr(UCase(mensajeSAP),"NO ESTÁ ASIGNADO") > 0 Then
+
+                    WScript.Echo "--------------------------------"
+                    WScript.Echo "ERROR: Tecnico no pertenece a la bodega -> " & rut
+                    WScript.Echo "Mensaje SAP: " & mensajeSAP
+
+                    logFile.WriteLine rut & ",ERROR_BODEGA," & bodega & "," & almacen
+
+                    saltarTecnico = True
+
+                End If
+
+                '---------------------------------------
+                ' DETECTAR SI SAP VOLVIO AL MENU
+                '---------------------------------------
+
+                Set grid = session.findById("wnd[0]/usr/cntlCUSTOM_CONTROL/shellcont/shell")
+
+                If Err.Number <> 0 Then
+
+                    WScript.Echo "--------------------------------"
+                    WScript.Echo "SAP volvió al menú inesperadamente"
+                    WScript.Echo "Tecnico problemático: " & rut
+
+                    logFile.WriteLine rut & ",ERROR_MENU_SAP," & bodega & "," & almacen
+
+                    'reabrir reporte
+                    session.findById("wnd[0]/usr/cntlIMAGE_CONTAINER/shellcont/shell/shellcont[0]/shell").doubleClickNode "F00010"
+
+                    WScript.Sleep 3000
+
+                    saltarTecnico = True
+                    pantallaValida = False
+
+                    Err.Clear
+
+                End If
+
+                If saltarTecnico Then
+                    WScript.Echo "Saltando tecnico..."
+                Else
+
+                    '---------------------------------------
+                    ' ABRIR NODO DEL TECNICO
+                    '---------------------------------------
+
+                    session.findById("wnd[0]/shellcont/shell/shellcont[1]/shell[1]").selectedNode = "          1"
+                    session.findById("wnd[0]/shellcont/shell/shellcont[1]/shell[1]").doubleClickNode "          1"
+
+                    Do While session.Busy
+                        WScript.Sleep 500
+                    Loop
+
+                    '---------------------------------------
+                    ' DETECTAR SIN MATERIALES
+                    '---------------------------------------
+
+                    sinMateriales = False
+
+                    If session.Children.Count > 1 Then
+
+                        WScript.Echo "Tecnico sin materiales: " & rut
+
+                        logFile.WriteLine rut & "," & bodega & "," & almacen
+
+                        totalSinMateriales = totalSinMateriales + 1
+
+                        session.findById("wnd[1]/tbar[0]/btn[0]").press
+
+                        WScript.Sleep 1000
+
+                        session.findById("wnd[0]/tbar[0]/btn[12]").press
+
+                        If session.Children.Count > 1 Then
+                            session.findById("wnd[1]/usr/btnBUTTON_1").press
+                        End If
+
+                        WScript.Sleep 1500
+
+                        sinMateriales = True
+
+                    End If
+
+                    '---------------------------------------
+                    ' EXPORTAR MATERIALES
+                    '---------------------------------------
+
+                    If Not sinMateriales Then
+
+                        Set grid = session.findById("wnd[0]/usr/cntlCUSTOM_CONTROL/shellcont/shell")
+
+                        Dim totalMateriales
+                        totalMateriales = grid.RowCount
+
+                        WScript.Echo "Tecnico: " & rut & " -> Materiales encontrados: " & totalMateriales
+
+                        grid.contextMenu
+                        grid.selectContextMenuItem "&XXL"
+
+                        WScript.Sleep 1500
+
+                        If session.Children.Count > 1 Then
+                            session.findById("wnd[1]/tbar[0]/btn[0]").press
+                        End If
+
+                        WScript.Sleep 1500
+
+                        If session.Children.Count > 1 Then
+
+                            session.findById("wnd[1]/usr/ctxtDY_PATH").text = "C:\sap\SAP\output"
+
+                            session.findById("wnd[1]/usr/ctxtDY_FILENAME").text = _
+                            rut & "_" & bodega & "_" & almacen & "_" & _
+                            Day(Date) & "-" & Month(Date) & "-" & Year(Date) & ".xlsx"
+
+                            session.findById("wnd[1]/tbar[0]/btn[0]").press
+
+                        End If
+
+                        WScript.Sleep 2000
+
+                        session.findById("wnd[0]/tbar[0]/btn[12]").press
+
+                        If session.Children.Count > 1 Then
+                            session.findById("wnd[1]/usr/btnBUTTON_1").press
+                        End If
+
+                        WScript.Sleep 1500
+
+                    End If
+
+                End If
+
+            End If
+
+        Loop
+
+        archivo.Close
+
+    End If
+
+Next
+
+logFile.Close
+
+WScript.Echo "--------------------------------"
+WScript.Echo "Proceso finalizado"
+WScript.Echo "Tecnicos procesados: " & totalProcesados
+WScript.Echo "Tecnicos sin materiales: " & totalSinMateriales
